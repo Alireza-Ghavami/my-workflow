@@ -1,0 +1,26 @@
+{
+  "outbounds": [{
+    "protocol": "vmess",
+    "settings": {
+      "vnext": [{
+        "address": "",
+        "port": 443,
+        "users": [{
+          "id": "99a6f3ff-967f-4eed-b461-6027be745ba3",
+          "alterId": 0,
+          "security": "auto"
+        }]
+      }]
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "tls",
+      "tlsSettings": {
+        "serverName": ""
+      },
+      "wsSettings": {
+        "path": "/ray-32db6f28"
+      }
+    }
+  }]
+}
