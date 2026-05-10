@@ -1,16 +1,31 @@
-name: Resilient V2Ray Server with WARP (Inspired by YT Downloader)
+name: Resilient V2Ray with WARP (TCP+WS)
+
 on:
   workflow_dispatch:
+
 jobs:
-  run-v2ray:
+  server:
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    steps:
-      # ... (مراحل اولیه checkout و تنظیم git) ...
+    permissions:
+      contents: write
 
-      - name: 🚀 Start Cloudflare WARP (SOCKS5 Proxy)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Git
         run: |
-          echo "Starting WARP container..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ------------------------------------------------------------
+      # 1. WARP Container (SOCKS5 proxy for outbound)
+      # ------------------------------------------------------------
+      - name: Start Cloudflare WARP (SOCKS5 on port 1080)
+        run: |
           docker network create warp-net 2>/dev/null || true
           docker run -d \
             --name warp \
@@ -23,64 +38,120 @@ jobs:
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
 
-          echo "⏳ Waiting for WARP to be fully ready..."
-          # این بلوک دقیقاً از کد یوتیوب دانلودر شما الهام گرفته شده است
+          echo "Waiting for WARP to be ready..."
           for i in $(seq 1 20); do
             RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
               https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
-              echo "✅ WARP is active after $i attempts!"
+              echo "✅ WARP is active after $i attempts"
               echo "$RESULT"
               break
             else
-              echo "Attempt $i/20 - WARP not ready, waiting 5s..."
+              echo "Attempt $i/20 - not ready, retrying in 5s..."
               sleep 5
             fi
           done
 
-          FINAL_CHECK=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
+          # Final validation
+          FINAL=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
             https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
-          if echo "$FINAL_CHECK" | grep -qE "warp=(on|plus)"; then
-            echo "WARP is confirmed working."
+          if echo "$FINAL" | grep -qE "warp=(on|plus)"; then
+            echo "WARP confirmed."
           else
-            echo "⚠️ WARP might not be fully active, continuing without it..."
+            echo "⚠️ WARP NOT confirmed – continuing without it (outbound may be limited)."
           fi
 
-      - name: ⚙️ Generate Config & Start V2Ray
+      # ------------------------------------------------------------
+      # 2. Download Xray-core & get server public IP
+      # ------------------------------------------------------------
+      - name: Install Xray and fetch public IP
         run: |
-          # ... (دانلود Xray، دریافت IP عمومی، تولید UUID و پورت) ...
+          echo "Downloading Xray..."
+          curl -fSL --retry 3 -o xray.zip \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          mkdir -p xray-core
+          unzip -qo xray.zip -d xray-core
+          chmod +x xray-core/xray
+          rm xray.zip
 
-          # ایجاد کانفیگ سرور V2Ray با خروجی از WARP SOCKS5
+          # Verify binary exists
+          if [ ! -f "./xray-core/xray" ]; then
+            echo "❌ FATAL: xray binary not found after extraction!"
+            exit 1
+          fi
+          echo "Xray version:"
+          ./xray-core/xray version || true
+
+          # Public IP
+          PUBLIC_IP=$(curl -s --retry 3 ifconfig.me)
+          if [ -z "$PUBLIC_IP" ]; then
+            echo "❌ Could not fetch public IP!"
+            exit 1
+          fi
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "Server public IP: $PUBLIC_IP"
+
+      # ------------------------------------------------------------
+      # 3. Generate UUID & random high port
+      # ------------------------------------------------------------
+      - name: Generate random credentials
+        run: |
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          echo "UUID=$UUID" >> $GITHUB_ENV
+          PORT=$((RANDOM % 10000 + 20000))
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "UUID: $UUID"
+          echo "Port: $PORT"
+
+      # ------------------------------------------------------------
+      # 4. Create and start server with outbound via WARP SOCKS5
+      # ------------------------------------------------------------
+      - name: Start V2Ray server
+        run: |
           cat > config.json <<EOF
           {
             "inbounds": [{
-              "port": ${PORT},
+              "port": ${{ env.PORT }},
               "listen": "0.0.0.0",
               "protocol": "vmess",
               "settings": {
-                "clients": [{"id": "${UUID}", "alterId": 0}]
+                "clients": [{
+                  "id": "${{ env.UUID }}",
+                  "alterId": 0
+                }]
               },
               "streamSettings": {
-                "network": "ws",
-                "wsSettings": {"path": "/graphql"}
+                "network": "tcp"
               }
             }],
             "outbounds": [
               {
                 "protocol": "socks",
                 "settings": {
-                  "servers": [{"address": "127.0.0.1", "port": 1080}]
+                  "servers": [{
+                    "address": "127.0.0.1",
+                    "port": 1080
+                  }]
                 }
               }
             ]
           }
           EOF
 
-          # اجرای Xray در پس‌زمینه
           ./xray-core/xray run -c config.json &
-          sleep 3
+          sleep 2
+          # Quick health check
+          if pgrep -f "xray-core/xray" > /dev/null; then
+            echo "✅ Xray is running."
+          else
+            echo "❌ Xray failed to start!"
+            exit 1
+          fi
 
-      - name: 📁 Build & Push Client Config
+      # ------------------------------------------------------------
+      # 5. Generate client config & VMess link
+      # ------------------------------------------------------------
+      - name: Build client config
         run: |
           cat > client-config.json <<EOF
           {
@@ -88,28 +159,47 @@ jobs:
               "protocol": "vmess",
               "settings": {
                 "vnext": [{
-                  "address": "${PUBLIC_IP}",
-                  "port": ${PORT},
-                  "users": [{"id": "${UUID}", "alterId": 0}]
+                  "address": "${{ env.PUBLIC_IP }}",
+                  "port": ${{ env.PORT }},
+                  "users": [{
+                    "id": "${{ env.UUID }}",
+                    "alterId": 0
+                  }]
                 }]
               },
               "streamSettings": {
-                "network": "ws",
-                "security": "tls",
-                "tlsSettings": {"serverName": "${PUBLIC_IP}"},
-                "wsSettings": {"path": "/graphql"}
+                "network": "tcp"
               }
             }]
           }
           EOF
 
-          VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-${PUBLIC_IP}\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${PUBLIC_IP}\",\"path\":\"/graphql\",\"tls\":\"tls\"}" | base64 -w0)"
+          # ساخت لینک VMess
+          VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-${PUBLIC_IP}\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\"}" | base64 -w0)"
           echo "$VMESS_LINK" > vmess-link.txt
+          echo "✅ Client config generated."
+          cat vmess-link.txt
 
-          # ... (کامیت و push فایل‌ها) ...
-
-      - name: ⏱️ Keep Alive
+      # ------------------------------------------------------------
+      # 6. Save to repository
+      # ------------------------------------------------------------
+      - name: Commit and push config files
         run: |
-          echo "✅ Server is LIVE with WARP-based resilient architecture."
+          git add client-config.json vmess-link.txt
+          git commit -m "🔄 New temp config (${{ env.PUBLIC_IP }}:${{ env.PORT }})" || echo "Nothing to commit"
+          git push
+
+      # ------------------------------------------------------------
+      # 7. Keep alive for 30 minutes
+      # ------------------------------------------------------------
+      - name: Keep alive
+        run: |
+          echo "========================================"
+          echo "✅ V2Ray + WARP is LIVE"
+          echo "📍 IP: ${{ env.PUBLIC_IP }}"
+          echo "🔌 Port: ${{ env.PORT }}"
+          echo "🔑 UUID: ${{ env.UUID }}"
+          echo "⏱️  Will shut down in 30 minutes"
+          echo "========================================"
           sleep 1800
-          echo "⏹️ Server shutting down."
+          echo "⏹️ Server terminated."
