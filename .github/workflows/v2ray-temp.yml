@@ -1,0 +1,136 @@
+name: V2Ray 30-Minute Server
+
+on:
+  workflow_dispatch:  # فقط دستی اجرا می‌شود
+
+jobs:
+  run-v2ray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35  # کمی بیشتر از ۳۰ دقیقه
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # اجازه push با GITHUB_TOKEN
+
+      - name: Set up Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install tools & download Xray
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq openssh-client
+          # دانلود Xray (نسخه هسته اصلی)
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip
+          chmod +x xray
+          rm xray.zip
+
+      - name: Generate random config
+        id: vars
+        run: |
+          UUID=$(cat /proc/sys/kernel/random/uuid)
+          echo "UUID=$UUID" >> $GITHUB_OUTPUT
+          PORT=$((RANDOM % 10000 + 20000))
+          echo "PORT=$PORT" >> $GITHUB_OUTPUT
+          WS_PATH="/ray-$(openssl rand -hex 4)"
+          echo "WS_PATH=$WS_PATH" >> $GITHUB_OUTPUT
+
+      - name: Create V2Ray server config
+        run: |
+          cat > config.json <<EOF
+          {
+            "inbounds": [{
+              "port": ${{ steps.vars.outputs.PORT }},
+              "listen": "127.0.0.1",
+              "protocol": "vmess",
+              "settings": {
+                "clients": [{
+                  "id": "${{ steps.vars.outputs.UUID }}",
+                  "alterId": 0
+                }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": {
+                  "path": "${{ steps.vars.outputs.WS_PATH }}"
+                }
+              }
+            }],
+            "outbounds": [{
+              "protocol": "freedom"
+            }]
+          }
+          EOF
+
+      - name: Start Xray server
+        run: |
+          ./xray run -c config.json &
+          sleep 2  # Wait for server to start
+
+      - name: Start SSH tunnel & get public URL
+        run: |
+          # ایجاد تونل با localhost.run (بدون نیاز به ثبت‌نام)
+          ssh -o StrictHostKeyChecking=no -R 80:localhost:${{ steps.vars.outputs.PORT }} localhost.run > tunnel-url.txt &
+          # صبر کن تا تونل وصل شود و URL برگردد
+          for i in $(seq 1 15); do
+            if grep -q 'https://' tunnel-url.txt; then
+              break
+            fi
+            sleep 2
+          done
+          # Extract the hostname from output (e.g., abcdef.lhrtunnel.link)
+          TUNNEL_HOST=$(grep -oP 'https://\K[^ ]+' tunnel-url.txt | head -1 | tr -d '\r')
+          echo "TUNNEL_HOST=$TUNNEL_HOST"
+          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_OUTPUT
+          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
+        id: tunnel
+
+      - name: Build client config
+        run: |
+          cat > client-config.json <<EOF
+          {
+            "outbounds": [{
+              "protocol": "vmess",
+              "settings": {
+                "vnext": [{
+                  "address": "${{ steps.tunnel.outputs.TUNNEL_HOST }}",
+                  "port": 443,
+                  "users": [{
+                    "id": "${{ steps.vars.outputs.UUID }}",
+                    "alterId": 0,
+                    "security": "auto"
+                  }]
+                }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {
+                  "serverName": "${{ steps.tunnel.outputs.TUNNEL_HOST }}"
+                },
+                "wsSettings": {
+                  "path": "${{ steps.vars.outputs.WS_PATH }}"
+                }
+              }
+            }]
+          }
+          EOF
+          # یک نسخه لینک vmess هم می‌سازیم (اختیاری)
+          VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-Temp\",\"add\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"port\":\"443\",\"id\":\"${{ steps.vars.outputs.UUID }}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"path\":\"${{ steps.vars.outputs.WS_PATH }}\",\"tls\":\"tls\"}" | base64 -w0)"
+          echo "$VMESS_LINK" > vmess-link.txt
+
+      - name: Commit and push config files
+        run: |
+          git add client-config.json vmess-link.txt
+          git commit -m "🔄 New temp config (expires in 30min)" || echo "No changes"
+          git push
+
+      - name: Keep alive for 30 minutes
+        run: |
+          echo "Server is alive. You can now download client-config.json"
+          sleep 1800  # ۳۰ دقیقه
+          echo "Time's up. Server will shut down."
