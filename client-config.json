@@ -3,24 +3,16 @@
     "protocol": "vmess",
     "settings": {
       "vnext": [{
-        "address": "",
-        "port": 443,
+        "address": "20.161.28.98",
+        "port": 20884,
         "users": [{
-          "id": "99a6f3ff-967f-4eed-b461-6027be745ba3",
-          "alterId": 0,
-          "security": "auto"
+          "id": "e86da3ab-3b8e-43a8-9f71-a4b455b63d31",
+          "alterId": 0
         }]
       }]
     },
     "streamSettings": {
-      "network": "ws",
-      "security": "tls",
-      "tlsSettings": {
-        "serverName": ""
-      },
-      "wsSettings": {
-        "path": "/ray-32db6f28"
-      }
+      "network": "tcp"
     }
   }]
 }
