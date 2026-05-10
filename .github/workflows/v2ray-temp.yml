@@ -22,7 +22,11 @@ jobs:
       - name: Install tools & download Xray
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq openssh-client
+          sudo apt-get install -y jq
+          # نصب cloudflared
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          # دانلود Xray
           curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           mkdir xray-core
           unzip -q xray.zip -d xray-core
@@ -71,19 +75,27 @@ jobs:
           ./xray-core/xray run -c config.json &
           sleep 2
 
-      - name: Start SSH tunnel & get public URL
+      - name: Start Cloudflare Tunnel & get public URL
         id: tunnel
         run: |
-          ssh -o StrictHostKeyChecking=no -R 80:localhost:${{ steps.vars.outputs.PORT }} localhost.run > tunnel-url.txt &
-          # Wait for URL (max 15 attempts, 2s each)
-          for i in $(seq 1 15); do
-            if grep -q 'https://' tunnel-url.txt; then
+          # اجرای cloudflared در بک‌گراند و ذخیره خروجی
+          cloudflared tunnel --url http://localhost:${{ steps.vars.outputs.PORT }} > tunnel.log 2>&1 &
+          # صبر برای ایجاد تونل (حداکثر ۲۰ ثانیه)
+          for i in $(seq 1 20); do
+            if grep -q 'trycloudflare.com' tunnel.log; then
               break
             fi
-            sleep 2
+            sleep 1
           done
-          TUNNEL_HOST=$(grep -oP 'https://\K[^ ]+' tunnel-url.txt | head -1 | tr -d '\r')
-          echo "TUNNEL_HOST=$TUNNEL_HOST"
+          # استخراج دامنه از خروجی (مثلاً https://abc.trycloudflare.com)
+          TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -1)
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ Could not get tunnel URL. Full log:"
+            cat tunnel.log
+            exit 1
+          fi
+          TUNNEL_HOST=$(echo "$TUNNEL_URL" | sed 's|https://||')
+          echo "Tunnel host: $TUNNEL_HOST"
           echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_OUTPUT
 
       - name: Build client config
@@ -102,6 +114,35 @@ jobs:
                     "security": "auto"
                   }]
                 }]
+              },
+              "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {
+                  "serverName": "${{ steps.tunnel.outputs.TUNNEL_HOST }}"
+                },
+                "wsSettings": {
+                  "path": "${{ steps.vars.outputs.WS_PATH }}"
+                }
+              }
+            }]
+          }
+          EOF
+          # لینک vmess برای ایمپورت مستقیم
+          VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-Temp\",\"add\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"port\":\"443\",\"id\":\"${{ steps.vars.outputs.UUID }}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"path\":\"${{ steps.vars.outputs.WS_PATH }}\",\"tls\":\"tls\"}" | base64 -w0)"
+          echo "$VMESS_LINK" > vmess-link.txt
+
+      - name: Commit and push config files
+        run: |
+          git add client-config.json vmess-link.txt
+          git commit -m "🔄 New temp config (expires in 30min)" || echo "No changes"
+          git push
+
+      - name: Keep alive for 30 minutes
+        run: |
+          echo "✅ Server is alive. Download client-config.json or use vmess-link.txt"
+          sleep 1800
+          echo "⏹️ Time's up. Server will shut down."                }]
               },
               "streamSettings": {
                 "network": "ws",
