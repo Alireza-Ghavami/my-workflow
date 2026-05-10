@@ -3,10 +3,10 @@
     "protocol": "vmess",
     "settings": {
       "vnext": [{
-        "address": "20.161.28.98",
-        "port": 20884,
+        "address": "20.12.182.162",
+        "port": 25866,
         "users": [{
-          "id": "e86da3ab-3b8e-43a8-9f71-a4b455b63d31",
+          "id": "f3e141e0-36a8-4ae8-9c77-f2150ff9f9c6",
           "alterId": 0
         }]
       }]
