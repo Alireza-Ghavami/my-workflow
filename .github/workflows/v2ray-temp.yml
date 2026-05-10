@@ -1,18 +1,18 @@
 name: V2Ray 30-Minute Server
 
 on:
-  workflow_dispatch:  # فقط دستی اجرا می‌شود
+  workflow_dispatch:
 
 jobs:
   run-v2ray:
     runs-on: ubuntu-latest
-    timeout-minutes: 35  # کمی بیشتر از ۳۰ دقیقه
+    timeout-minutes: 35
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true  # اجازه push با GITHUB_TOKEN
+          persist-credentials: true
 
       - name: Set up Git user
         run: |
@@ -23,10 +23,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq openssh-client
-          # دانلود Xray (نسخه هسته اصلی)
           curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          unzip xray.zip
-          chmod +x xray
+          mkdir xray-core
+          unzip -q xray.zip -d xray-core
+          chmod +x xray-core/xray
           rm xray.zip
 
       - name: Generate random config
@@ -68,26 +68,23 @@ jobs:
 
       - name: Start Xray server
         run: |
-          ./xray run -c config.json &
-          sleep 2  # Wait for server to start
+          ./xray-core/xray run -c config.json &
+          sleep 2
 
       - name: Start SSH tunnel & get public URL
+        id: tunnel
         run: |
-          # ایجاد تونل با localhost.run (بدون نیاز به ثبت‌نام)
           ssh -o StrictHostKeyChecking=no -R 80:localhost:${{ steps.vars.outputs.PORT }} localhost.run > tunnel-url.txt &
-          # صبر کن تا تونل وصل شود و URL برگردد
+          # Wait for URL (max 15 attempts, 2s each)
           for i in $(seq 1 15); do
             if grep -q 'https://' tunnel-url.txt; then
               break
             fi
             sleep 2
           done
-          # Extract the hostname from output (e.g., abcdef.lhrtunnel.link)
           TUNNEL_HOST=$(grep -oP 'https://\K[^ ]+' tunnel-url.txt | head -1 | tr -d '\r')
           echo "TUNNEL_HOST=$TUNNEL_HOST"
           echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_OUTPUT
-          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
-        id: tunnel
 
       - name: Build client config
         run: |
@@ -119,7 +116,6 @@ jobs:
             }]
           }
           EOF
-          # یک نسخه لینک vmess هم می‌سازیم (اختیاری)
           VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-Temp\",\"add\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"port\":\"443\",\"id\":\"${{ steps.vars.outputs.UUID }}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${{ steps.tunnel.outputs.TUNNEL_HOST }}\",\"path\":\"${{ steps.vars.outputs.WS_PATH }}\",\"tls\":\"tls\"}" | base64 -w0)"
           echo "$VMESS_LINK" > vmess-link.txt
 
@@ -132,5 +128,5 @@ jobs:
       - name: Keep alive for 30 minutes
         run: |
           echo "Server is alive. You can now download client-config.json"
-          sleep 1800  # ۳۰ دقیقه
+          sleep 1800
           echo "Time's up. Server will shut down."
