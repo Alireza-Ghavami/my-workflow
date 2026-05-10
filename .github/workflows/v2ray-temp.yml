@@ -1,4 +1,4 @@
-name: V2Ray 30-Minute Server
+name: V2Ray Direct - 30 Minutes
 
 on:
   workflow_dispatch:
@@ -19,48 +19,50 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Install tools & download Xray
+      - name: Download Xray & get Public IP
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          # نصب cloudflared
-          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
           # دانلود Xray
           curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           mkdir xray-core
           unzip -q xray.zip -d xray-core
           chmod +x xray-core/xray
           rm xray.zip
+          
+          # گرفتن آی‌پی عمومی رانر
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "PUBLIC_IP=$PUBLIC_IP"
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
 
       - name: Generate random config
-        id: vars
         run: |
           UUID=$(cat /proc/sys/kernel/random/uuid)
-          echo "UUID=$UUID" >> $GITHUB_OUTPUT
+          echo "UUID=$UUID" >> $GITHUB_ENV
           PORT=$((RANDOM % 10000 + 20000))
-          echo "PORT=$PORT" >> $GITHUB_OUTPUT
-          WS_PATH="/ray-$(openssl rand -hex 4)"
-          echo "WS_PATH=$WS_PATH" >> $GITHUB_OUTPUT
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "Generated UUID: $UUID"
+          echo "Listening port: $PORT"
+          echo "Public IP: ${{ env.PUBLIC_IP }}"
 
       - name: Create V2Ray server config
         run: |
           cat > config.json <<EOF
           {
             "inbounds": [{
-              "port": ${{ steps.vars.outputs.PORT }},
-              "listen": "127.0.0.1",
+              "port": ${PORT},
+              "listen": "0.0.0.0",
               "protocol": "vmess",
               "settings": {
                 "clients": [{
-                  "id": "${{ steps.vars.outputs.UUID }}",
+                  "id": "${UUID}",
                   "alterId": 0
                 }]
               },
               "streamSettings": {
-                "network": "ws",
-                "wsSettings": {
-                  "path": "${{ steps.vars.outputs.WS_PATH }}"
+                "network": "tcp",
+                "tcpSettings": {
+                  "header": {
+                    "type": "none"
+                  }
                 }
               }
             }],
@@ -69,35 +71,63 @@ jobs:
             }]
           }
           EOF
+          cat config.json
 
       - name: Start Xray server
         run: |
           ./xray-core/xray run -c config.json &
-          sleep 2
+          sleep 3
+          # تست اینکه سرور بالا آمده
+          curl -s --connect-timeout 2 telnet://${{ env.PUBLIC_IP }}:${{ env.PORT }} || echo "Port check done"
 
-      - name: Start Cloudflare Tunnel & get public URL
-        id: tunnel
+      - name: Build client config files
         run: |
-          # اجرای cloudflared در بک‌گراند و ذخیره خروجی
-          cloudflared tunnel --url http://localhost:${{ steps.vars.outputs.PORT }} > tunnel.log 2>&1 &
-          # صبر برای ایجاد تونل (حداکثر ۲۰ ثانیه)
-          for i in $(seq 1 20); do
-            if grep -q 'trycloudflare.com' tunnel.log; then
-              break
-            fi
-            sleep 1
-          done
-          # استخراج دامنه از خروجی (مثلاً https://abc.trycloudflare.com)
-          TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -1)
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ Could not get tunnel URL. Full log:"
-            cat tunnel.log
-            exit 1
-          fi
-          TUNNEL_HOST=$(echo "$TUNNEL_URL" | sed 's|https://||')
-          echo "Tunnel host: $TUNNEL_HOST"
-          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_OUTPUT
+          # کانفیگ JSON
+          cat > client-config.json <<EOF
+          {
+            "outbounds": [{
+              "protocol": "vmess",
+              "settings": {
+                "vnext": [{
+                  "address": "${PUBLIC_IP}",
+                  "port": ${PORT},
+                  "users": [{
+                    "id": "${UUID}",
+                    "alterId": 0
+                  }]
+                }]
+              },
+              "streamSettings": {
+                "network": "tcp"
+              }
+            }]
+          }
+          EOF
+          
+          # لینک VMess برای ایمپورت مستقیم
+          VMESS_LINK="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"GitHub-${PUBLIC_IP}\",\"add\":\"${PUBLIC_IP}\",\"port\":\"${PORT}\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\"}" | base64 -w0)"
+          echo "$VMESS_LINK" > vmess-link.txt
+          
+          echo "✅ Config files created"
+          echo "Address: ${PUBLIC_IP}:${PORT}"
 
+      - name: Commit and push
+        run: |
+          git add client-config.json vmess-link.txt
+          git commit -m "🔄 Config ${PUBLIC_IP}:${PORT}" || echo "No changes"
+          git push
+
+      - name: Keep alive 30 minutes
+        run: |
+          echo "========================================"
+          echo "✅ V2Ray Server is RUNNING"
+          echo "📍 IP: ${PUBLIC_IP}"
+          echo "🔌 Port: ${PORT}"
+          echo "🔑 UUID: ${UUID}"
+          echo "⏱️  Will stay alive for 30 minutes"
+          echo "========================================"
+          sleep 1800
+          echo "⏹️ Time's up. Server shutting down."
       - name: Build client config
         run: |
           cat > client-config.json <<EOF
