@@ -51,9 +51,10 @@ on:
         options:
           - '***'
           - '****'
+          - 'search'          # <-- جدید: جستجوی کلی با وارد کردن کوئری
         default: '***'
       tag_or_url:
-        description: 'URL or tag name for link extraction'
+        description: 'URL, tag name, or search query (for search mode)'
         required: false
         type: string
         default: ''
@@ -260,7 +261,17 @@ jobs:
           NUM_LINKS="${{ github.event.inputs.num_links }}"
           PLATFORM="${{ github.event.inputs.platform }}"
 
-          if [[ "$INPUT" =~ ^https?:// ]]; then
+          # حالت جدید: جستجوی کلی (بدون وابستگی به تگ یا نام کاربر)
+          if [[ "$PLATFORM" == "search" ]]; then
+            # تبدیل فاصله‌ها به + برای URL (در صورت نیاز می‌توانی urlencode کامل انجام دهی)
+            QUERY=$(echo "$INPUT" | sed 's/ /+/g')
+            # ⚠️ آدرس زیر را متناسب با پلتفرم واقعی خودت ویرایش کن
+            # مثال برای پلتفرم *** (در صورت پشتیبانی از پارامتر q)
+            TARGET_URL="https://www.***.com/search?q=${QUERY}"
+            # اگر پلتفرم دوم (****) هم جستجو دارد و می‌خواهی جداگانه انتخاب شود،
+            # می‌توانی ورودی دیگری اضافه کنی. در اینجا فرض کردیم فقط *** برای جستجو استفاده می‌شود.
+            echo "Search mode: query='${INPUT}' -> ${TARGET_URL}"
+          elif [[ "$INPUT" =~ ^https?:// ]]; then
             TARGET_URL="$INPUT"
           else
             TAG=$(echo "$INPUT" | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
@@ -269,7 +280,7 @@ jobs:
                 TARGET_URL="https://www.***.com/gifs/tag/${TAG}"
                 ;;
               "****")
-                TARGET_URL="https://www.****.com/tag/${TAG}"
+                TARGET_URL="https://www.***.com/tag/${TAG}"
                 ;;
               *)
                 echo "Unknown platform: $PLATFORM"
