@@ -28,20 +28,34 @@ on:
         type: string
         default: 'bestvideo[height<=720]+bestaudio/best[ext=mp4]/best'
       archive_name:
-        description: 'Base name for ZIP archive (download mode, if archiving/splitting)'
+        description: 'Base name for ZIP/7z archive (download mode, if archiving/splitting)'
         required: false
         type: string
         default: 'video'
       enable_zip:
-        description: 'Enable ZIP archiving for downloaded file (with optional password)'
-        required: false
+        description: 'Enable ZIP/7z archiving for downloaded file (with optional password)'
+        required: true
         default: true
         type: boolean
       zip_password:
-        description: 'Password for ZIP archive of downloaded file (leave empty for no password)'
+        description: 'Password for the archive of downloaded file (leave empty for no password)'
         required: false
         default: ''
         type: string
+
+      compression_method:
+        description: 'Compression method'
+        required: false
+        type: choice
+        options:
+          - zip
+          - 7z
+        default: 'zip'
+      compression_level:
+        description: 'Compression level (0-9 for zip, 1-9 for 7z)'
+        required: true
+        type: number
+        default: 4
 
       # --- Link extraction inputs ---
       platform:
@@ -51,8 +65,8 @@ on:
         options:
           - '***'
           - '****'
-          - 'search'          # <-- جدید: جستجوی کلی با وارد کردن کوئری
-        default: '***'
+          - 'search'
+        default: '****'
       tag_or_url:
         description: 'URL, tag name, or search query (for search mode)'
         required: false
@@ -64,12 +78,12 @@ on:
         type: number
         default: 10
       extract_enable_zip:
-        description: 'Enable ZIP archiving for the extracted links list (with optional password)'
+        description: 'Enable ZIP/7z archiving for the extracted links list (with optional password)'
         required: false
         default: true
         type: boolean
       extract_zip_password:
-        description: 'Password for the links ZIP archive (leave empty for no password)'
+        description: 'Password for the links archive (leave empty for no password)'
         required: false
         default: ''
         type: string
@@ -94,11 +108,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install yt-dlp and bc
+      - name: Install tools (yt-dlp, bc, and optional 7z)
         run: |
           pip install -U yt-dlp
           sudo apt-get update
-          sudo apt-get install -y bc
+          sudo apt-get install -y bc p7zip-full   # p7zip-full for 7z support
 
       - name: Download video (retry up to 5 times)
         id: download
@@ -159,7 +173,7 @@ jobs:
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
 
-      - name: ZIP archiving & splitting (optional password)
+      - name: Archive & split (supports ZIP and 7z)
         id: archive
         shell: bash
         run: |
@@ -171,45 +185,77 @@ jobs:
 
           ENABLE_ZIP="${{ github.event.inputs.enable_zip }}"
           ZIP_PASS="${{ github.event.inputs.zip_password }}"
+          COMPRESS_METHOD="${{ github.event.inputs.compression_method }}"
+          COMPRESS_LEVEL="${{ github.event.inputs.compression_level }}"
 
           cd "$FOLDER"
+          RANDOM_HEX=$(openssl rand -hex 3)
+
+          # تعیین پسوند و نام آرشیو بر اساس روش فشرده‌سازی
+          if [ "$COMPRESS_METHOD" = "7z" ]; then
+            ARCHIVE_BASE="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}.7z"
+          else
+            ARCHIVE_BASE="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}.zip"
+          fi
+
+          # ساخت آرگومان‌های رمز عبور
+          if [ -n "$ZIP_PASS" ]; then
+            if [ "$COMPRESS_METHOD" = "7z" ]; then
+              PASS_ARG=(-p"${ZIP_PASS}")
+            else
+              PASS_ARG=(-P "${ZIP_PASS}")
+            fi
+          else
+            PASS_ARG=()
+          fi
+
+          # آرگومان‌های سطح فشرده‌سازی
+          if [ "$COMPRESS_METHOD" = "7z" ]; then
+            # 7z level: -mx=N (1..9)
+            LEVEL_ARG=(-mx="${COMPRESS_LEVEL}")
+          else
+            # zip level: -N (0..9)
+            LEVEL_ARG=(-"${COMPRESS_LEVEL}")
+          fi
 
           if [ "$ENABLE_ZIP" = "true" ]; then
-            echo "ZIP archiving enabled."
-
-            RANDOM_HEX=$(openssl rand -hex 3)
-            ARCHIVE_NAME="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}.zip"
-
-            if [ -n "$ZIP_PASS" ]; then
-              PASS_ARG="-P ${ZIP_PASS}"
-            else
-              PASS_ARG=""
-            fi
+            echo "Archiving enabled (method: $COMPRESS_METHOD, level: $COMPRESS_LEVEL)."
 
             if (( $(echo "$SIZE_MB > $THRESHOLD_MB" | bc -l) )); then
-              echo "File > ${THRESHOLD_MB} MB, splitting into 95 MB parts with ZIP..."
-              zip ${PASS_ARG} -s 95m "${ARCHIVE_NAME}" "$FILENAME"
+              echo "File > ${THRESHOLD_MB} MB, splitting into 95 MB parts..."
+              if [ "$COMPRESS_METHOD" = "7z" ]; then
+                7z a "${LEVEL_ARG[@]}" "${PASS_ARG[@]}" -v95m "${ARCHIVE_BASE}" "$FILENAME"
+              else
+                zip "${LEVEL_ARG[@]}" "${PASS_ARG[@]}" -s 95m "${ARCHIVE_BASE}" "$FILENAME"
+              fi
               rm "$FILENAME"
-              ls -lh ${ARCHIVE_NAME%.zip}.z* 2>/dev/null || ls -lh ${ARCHIVE_NAME}
+              # نمایش فایل‌های تولید شده
+              ls -lh ${ARCHIVE_BASE%.7z}.* 2>/dev/null || ls -lh ${ARCHIVE_BASE%.zip}.* 2>/dev/null || ls -lh "${ARCHIVE_BASE}"
             else
-              echo "File <= ${THRESHOLD_MB} MB, creating a single ZIP archive..."
-              zip ${PASS_ARG} "${ARCHIVE_NAME}" "$FILENAME"
+              echo "File <= ${THRESHOLD_MB} MB, creating single archive..."
+              if [ "$COMPRESS_METHOD" = "7z" ]; then
+                7z a "${LEVEL_ARG[@]}" "${PASS_ARG[@]}" "${ARCHIVE_BASE}" "$FILENAME"
+              else
+                zip "${LEVEL_ARG[@]}" "${PASS_ARG[@]}" "${ARCHIVE_BASE}" "$FILENAME"
+              fi
               rm "$FILENAME"
-              ls -lh "${ARCHIVE_NAME}"
+              ls -lh "${ARCHIVE_BASE}"
             fi
 
             echo "archive_done=true" >> $GITHUB_OUTPUT
 
           else
-            echo "ZIP archiving disabled."
-
+            echo "Archiving disabled (enable_zip=false)."
+            # اگر فایل بزرگتر از حد مجاز باشد، حتی بدون درخواست آرشیو، برای تقسیم از روش انتخاب‌شده استفاده می‌کنیم
             if (( $(echo "$SIZE_MB > $THRESHOLD_MB" | bc -l) )); then
-              RANDOM_HEX=$(openssl rand -hex 3)
-              ARCHIVE_NAME="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}.zip"
-              echo "File > ${THRESHOLD_MB} MB, splitting without password..."
-              zip -s 95m "${ARCHIVE_NAME}" "$FILENAME"
+              echo "File > ${THRESHOLD_MB} MB, forced splitting without password..."
+              if [ "$COMPRESS_METHOD" = "7z" ]; then
+                7z a "${LEVEL_ARG[@]}" -v95m "${ARCHIVE_BASE}" "$FILENAME"
+              else
+                zip "${LEVEL_ARG[@]}" -s 95m "${ARCHIVE_BASE}" "$FILENAME"
+              fi
               rm "$FILENAME"
-              ls -lh ${ARCHIVE_NAME%.zip}.z* 2>/dev/null || ls -lh ${ARCHIVE_NAME}
+              ls -lh ${ARCHIVE_BASE%.7z}.* 2>/dev/null || ls -lh ${ARCHIVE_BASE%.zip}.* 2>/dev/null || ls -lh "${ARCHIVE_BASE}"
             else
               echo "File size OK, no splitting required."
             fi
@@ -248,11 +294,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install yt-dlp and zip (just in case)
+      - name: Install yt-dlp, zip and 7z
         run: |
           pip install -U yt-dlp
           sudo apt-get update
-          sudo apt-get install -y zip
+          sudo apt-get install -y zip p7zip-full
 
       - name: Extract links from selected platform
         id: extract
@@ -261,15 +307,9 @@ jobs:
           NUM_LINKS="${{ github.event.inputs.num_links }}"
           PLATFORM="${{ github.event.inputs.platform }}"
 
-          # حالت جدید: جستجوی کلی (بدون وابستگی به تگ یا نام کاربر)
           if [[ "$PLATFORM" == "search" ]]; then
-            # تبدیل فاصله‌ها به + برای URL (در صورت نیاز می‌توانی urlencode کامل انجام دهی)
             QUERY=$(echo "$INPUT" | sed 's/ /+/g')
-            # ⚠️ آدرس زیر را متناسب با پلتفرم واقعی خودت ویرایش کن
-            # مثال برای پلتفرم *** (در صورت پشتیبانی از پارامتر q)
             TARGET_URL="https://www.***.com/search?q=${QUERY}"
-            # اگر پلتفرم دوم (****) هم جستجو دارد و می‌خواهی جداگانه انتخاب شود،
-            # می‌توانی ورودی دیگری اضافه کنی. در اینجا فرض کردیم فقط *** برای جستجو استفاده می‌شود.
             echo "Search mode: query='${INPUT}' -> ${TARGET_URL}"
           elif [[ "$INPUT" =~ ^https?:// ]]; then
             TARGET_URL="$INPUT"
@@ -307,7 +347,6 @@ jobs:
           TOTAL=$(wc -l < "$TMP_LINKS")
           echo "Successfully extracted $TOTAL links."
 
-          # Create markdown summary
           LINKS_FILE="/tmp/extracted_links.md"
           {
             echo "# Extracted Links Summary"
@@ -320,19 +359,28 @@ jobs:
 
           cat "$LINKS_FILE"
 
-          # Determine final file to push (ZIP or MD)
           ENABLE_ZIP="${{ github.event.inputs.extract_enable_zip }}"
           ZIP_PASS="${{ github.event.inputs.extract_zip_password }}"
+          COMPRESS_METHOD="${{ github.event.inputs.compression_method }}"
+          COMPRESS_LEVEL="${{ github.event.inputs.compression_level }}"
 
           if [ "$ENABLE_ZIP" = "true" ]; then
-            echo "ZIP archiving for extracted links enabled."
+            echo "Archiving enabled for links list (method: $COMPRESS_METHOD)."
             RANDOM_HEX=$(openssl rand -hex 3)
-            ARCHIVE_NAME="/tmp/extracted_links_${RANDOM_HEX}.zip"
-
-            if [ -n "$ZIP_PASS" ]; then
-              zip -P "${ZIP_PASS}" "${ARCHIVE_NAME}" "$LINKS_FILE"
+            if [ "$COMPRESS_METHOD" = "7z" ]; then
+              ARCHIVE_NAME="/tmp/extracted_links_${RANDOM_HEX}.7z"
+              if [ -n "$ZIP_PASS" ]; then
+                7z a -mx="${COMPRESS_LEVEL}" -p"${ZIP_PASS}" "${ARCHIVE_NAME}" "$LINKS_FILE"
+              else
+                7z a -mx="${COMPRESS_LEVEL}" "${ARCHIVE_NAME}" "$LINKS_FILE"
+              fi
             else
-              zip "${ARCHIVE_NAME}" "$LINKS_FILE"
+              ARCHIVE_NAME="/tmp/extracted_links_${RANDOM_HEX}.zip"
+              if [ -n "$ZIP_PASS" ]; then
+                zip -"${COMPRESS_LEVEL}" -P "${ZIP_PASS}" "${ARCHIVE_NAME}" "$LINKS_FILE"
+              else
+                zip -"${COMPRESS_LEVEL}" "${ARCHIVE_NAME}" "$LINKS_FILE"
+              fi
             fi
 
             FINAL_FILE="$ARCHIVE_NAME"
@@ -346,7 +394,6 @@ jobs:
             echo "final_filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
           fi
 
-          # Save for next steps
           echo "final_file=$FINAL_FILE" >> $GITHUB_OUTPUT
 
       - name: Copy final file to lists/
@@ -376,7 +423,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "[Link Extraction] $([ "${{ steps.extract.outputs.zip_created }}" = 'true' ] && echo 'Zipped list' || echo 'Updated list') for ${PLATFORM} [skip ci]"
+          git commit -m "[Link Extraction] $([ "${{ steps.extract.outputs.zip_created }}" = 'true' ] && echo 'Zipped/7z list' || echo 'Updated list') for ${PLATFORM} [skip ci]"
 
           RETRY_MAX=10
           for ((i=1; i<=RETRY_MAX; i++)); do
