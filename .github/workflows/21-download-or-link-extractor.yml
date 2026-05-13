@@ -110,7 +110,7 @@ jobs:
 
       - name: Install tools (yt-dlp, bc, and optional 7z)
         run: |
-          pip install -U yt-dlp
+          ppip install --upgrade --force-reinstall https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
           sudo apt-get update
           sudo apt-get install -y bc p7zip-full   # p7zip-full for 7z support
 
@@ -296,7 +296,7 @@ jobs:
 
       - name: Install yt-dlp, zip and 7z
         run: |
-          pip install -U yt-dlp
+          pip install --upgrade --force-reinstall https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz
           sudo apt-get update
           sudo apt-get install -y zip p7zip-full
 
