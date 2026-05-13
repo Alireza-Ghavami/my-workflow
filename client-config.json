@@ -1,0 +1,18 @@
+{
+  "outbounds": [{
+    "protocol": "vmess",
+    "settings": {
+      "vnext": [{
+        "address": "40.76.191.138",
+        "port": 28777,
+        "users": [{
+          "id": "ccdb98bd-7f7c-4a89-a176-95edb4a763f4",
+          "alterId": 0
+        }]
+      }]
+    },
+    "streamSettings": {
+      "network": "tcp"
+    }
+  }]
+}

@@ -1,0 +1,125 @@
+name: 📡 V2Ray Config Fetcher & Tester
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # هر 6 ساعت یکبار
+  workflow_dispatch:
+
+jobs:
+  fetch-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Start WARP SOCKS5 proxy (for outbound) - exactly like YT downloader
+        run: |
+          docker network create warp-net 2>/dev/null || true
+          docker run -d --name warp --restart=always --network warp-net \
+            -p 1080:1080 --cap-add NET_ADMIN \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp \
+            caomingjun/warp
+          
+          echo "Waiting for WARP to be ready (same as YT downloader)..."
+          for i in $(seq 1 20); do
+            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 \
+              https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
+              echo "✅ WARP active after $i attempts"
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Fetch configs from public sources
+        run: |
+          mkdir -p configs
+          # چند منبع معروف که کانفیگ‌های رایگان V2Ray vmess می‌دهند
+          SOURCES=(
+            "https://raw.githubusercontent.com/barry-far/V2ray-Configs/main/Sub3.txt"
+            "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2"
+            "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt"
+          )
+          for url in "${SOURCES[@]}"; do
+            echo "Fetching from $url"
+            curl -s --max-time 15 --socks5-hostname 127.0.0.1:1080 "$url" >> configs/raw.txt || echo "Failed to fetch $url"
+          done
+
+      - name: Decode and extract VMess links
+        run: |
+          # فایل raw ممکن است base64 شده باشد یا لینک مستقیم، آن را باز می‌کنیم و vmess:// ها را جدا می‌کنیم
+          python3 -c "
+          import base64, re, sys
+          with open('configs/raw.txt','r', encoding='utf-8') as f:
+              content = f.read()
+          # حذف کاراکترهای اضافه
+          content = content.strip()
+          links = set()
+          # ابتدا لینک‌های مستقیم vmess:// را پیدا کن
+          for match in re.findall(r'vmess://[A-Za-z0-9+/=_-]+', content):
+              links.add(match)
+          # اگر چیزی پیدا نشد، شاید محتوا base64 شده باشد
+          if not links:
+              try:
+                  decoded = base64.b64decode(content).decode('utf-8')
+                  for match in re.findall(r'vmess://[A-Za-z0-9+/=_-]+', decoded):
+                      links.add(match)
+              except:
+                  pass
+          with open('configs/vmess_links.txt','w') as out:
+              for link in links:
+                  out.write(link + '\n')
+          print(f'Extracted {len(links)} VMess links')
+          " || echo "No links extracted"
+
+      - name: Test each config quickly (connectivity)
+        run: |
+          # اینجا فقط تست می‌کنیم که آیا می‌توان به آی‌پی و پورت وصل شد یا نه
+          # برای تست واقعی سرعت، می‌توان ابزار پیچیده‌تری اضافه کرد
+          while IFS= read -r link; do
+            # decode vmess to get address,port
+            python3 -c "
+          import base64, json, sys
+          try:
+              b64 = link.replace('vmess://','')
+              # رفع padding
+              b64 += '=' * (4 - len(b64) % 4) if len(b64)%4 else ''
+              cfg = json.loads(base64.b64decode(b64).decode('utf-8'))
+              ip = cfg.get('add','')
+              port = cfg.get('port','')
+              if ip and port:
+                  print(f'{ip} {port}')
+          except:
+              pass
+          " >> /tmp/test_ips.txt
+          done < configs/vmess_links.txt
+          # تست ارتباط با پورت با netcat یا curl
+          while read -r ip port; do
+            timeout 3 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null && echo "$ip:$port OK" >> configs/working.txt
+          done < /tmp/test_ips.txt
+
+      - name: Generate final config file and push
+        run: |
+          # اگر تست موفق داشتیم، آن‌ها را به فایل BestConfigs.txt اضافه می‌کنیم
+          if [ -f configs/working.txt ]; then
+            cp configs/working.txt BestConfigs.txt
+          else
+            echo "No working configs found this run, keeping old file"
+            # استفاده از فایل قبلی
+          fi
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add BestConfigs.txt
+          git commit -m "🔄 Update working configs list" || echo "No changes"
+          git push
